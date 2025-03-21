@@ -4,14 +4,12 @@
 <title>mfm</title>
 <link rel="icon" type="image/png" href="img/SelfImage.png" />
 </head>
-<body style="margin: 0; overflow: hidden; background-color: #222">
-<canvas style="display: block"></canvas>
+<body style="margin: 0; background-color: #222">
+<canvas id="gl_canvas" style="position: absolute"></canvas>
+<canvas id="2d_canvas" style="position: absolute"></canvas>
 
 <script id="main">
 const grid_size = 256
-const time_zero = performance.now()
-let time_sec = 0
-let time_step = 0
 
 onload = function() {
     load_webgl()
@@ -19,18 +17,18 @@ onload = function() {
 }
 
 function loop() {
-    time_sec = (performance.now() - time_zero) / 1000
     fix_size()
+    update_timing()
     update_cam()
 
-    if (mouse_held(0)) {
-        interact()
-    }
-    if (!paused) {
-        for (let i=0; i < steps_per_frame; i++)
+    if (mouse_held(0)) interact()
+    const t = timing
+    if (!t.paused) {
+        for (let i=0; i < t.steps_per_frame; i++)
         { sim_step() }
     }
     draw()
+    if (show_debug) draw_debug()
 
     mouse.px = mouse.x
     mouse.py = mouse.y
@@ -40,11 +38,41 @@ function loop() {
 </script>
 
 
+<script id="timing">
+const now = () => performance.now()
+const timing = {
+    paused: false,
+    zero: now(),
+    sec: 0,
+    step: 0,
+    last_frame_start: -16,
+    fps: 60,
+    fps_slow: 0,
+    fps_hist: [],
+    steps_per_frame: 200,
+}
+
+setInterval(() => {
+    timing.fps_slow = timing.fps
+}, 1000);
+
+function update_timing() {
+    const frame_start = now()
+    const t = timing
+    t.sec = (frame_start - t.zero) / 1000
+    const last_fps = 1000 / (frame_start - t.last_frame_start)
+    t.fps = clamped_lerp(t.fps, last_fps, 0.5, 1.2)
+    t.fps_hist.push(t.fps)
+    if (t.fps_hist.length > 400) t.fps_hist.shift()
+    t.last_frame_start = frame_start
+}
+</script>
+
+
 <script id="controls">
-let paused = false
-let steps_per_frame = 200
 let show_ew = false
 let solid_colors = false
+let show_debug = false
 
 const brush = {
     get_size: () => 0.05 / zoom.scale,
@@ -98,12 +126,19 @@ onmouseleave = e => {
 }
 
 onkeydown = e => {
+    const t = timing
     switch (e.key) {
-        case " ": paused = !paused; break
+        case " ": t.paused = !t.paused; break
         case "ArrowRight": sim_step(); break
         case "w": show_ew = !show_ew; break
         case "s": solid_colors = !solid_colors; break
         case "e": brush.erase = true; break
+        case "d":
+            show_debug = !show_debug
+            ctx.clearRect(
+                0, 0, canvases.ctx.width, canvases.ctx.height
+            )
+            break
         case "r":
             init_cells(grid_cells[0], grid_size)
             break
@@ -201,13 +236,46 @@ function update_cam() {
         pan.yv *= 0.9
     }
 }
+</script>
 
+
+<script id="debug">
+function draw_debug() {
+    const [w, h] = [canvases.ctx.width, canvases.ctx.height]
+    ctx.clearRect(0, 0, w, h)
+
+    ctx.fillStyle = "rgba(0 0 0 / 50%)"
+    ctx.fillRect(0, 0, 400, 200)
+    ctx.fillStyle = "lightgreen"
+    ctx.font = "32px Courier New"
+    ctx.textBaseline = "top"
+    const t = timing
+    ctx.fillText(`fps: ${round(t.fps_slow)}`, 10, 10)
+
+    ctx.strokeStyle = ctx.fillStyle
+    ctx.lineCap = "round"
+    ctx.lineWidth = 3
+    ctx.beginPath()
+    for (let i=0; i < t.fps_hist.length; i++) {
+        const y = 200 - t.fps_hist[i] / 2
+        if (i > 0) ctx.lineTo(i, y)
+        ctx.moveTo(i, y)
+    }
+    ctx.stroke()
+}
+</script>
+
+
+<script id="math">
+const floor = Math.floor
+const round = Math.round
 const log2 = Math.log2
 const exp = Math.exp
 const pow = Math.pow
 const abs = Math.abs
 const min = Math.min
 const max = Math.max
+
 function clamp(x, a, b) {
     return min(max(x, a), b)
 }
@@ -217,6 +285,10 @@ function lerp(a, b, t) {
 function inv_lerp(a, b, x) {
     if (b - a === 0) return 0 
     return (x - a) / (b - a)
+}
+function clamped_lerp(a, b, t, f) {
+    // lerp from a, but dont change more than by a factor of f (> 1)
+    return clamp(lerp(a, b, t), a / f, a * f)
 }
 function mod(x, n) {
     return ((x % n) + n) % n
@@ -991,14 +1063,13 @@ vec4 get_ew_color(vec2 p) {
 
 <script id="webgl_loop">
 function fix_size() {
-    if (
-        canvas.width !== innerWidth
-        || canvas.height !== innerHeight
-    ) {
-        canvas.width = innerWidth
-        canvas.height = innerHeight
+    for (const [_, v] of Object.entries(canvases)) {
+        if (v.width !== innerWidth || v.height !== innerHeight) {
+            v.width = innerWidth
+            v.height = innerHeight
+        }
     }
-    gl.viewport(0, 0, canvas.width, canvas.height)
+    gl.viewport(0, 0, innerWidth, innerHeight)
 }
 
 function sim_step() {
@@ -1018,15 +1089,15 @@ function sim_step() {
     gl.bindTexture(gl.TEXTURE_2D, grid_cells[0])
     u1i("cells", 0)
 
-    u1i("time_step", time_step)
-    u1f("time_sec", time_sec)
+    u1i("time_step", timing.step)
+    u1f("time_sec", timing.sec)
     u1i("solid_colors", solid_colors)
 
     gl.enableVertexAttribArray(0)
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     grid_cells = [grid_cells[1], grid_cells[0]]
-    time_step++
+    timing.step++
 }
 
 function interact() {
@@ -1057,7 +1128,7 @@ function interact() {
     gl.bindTexture(gl.TEXTURE_2D, grid_cells[0])
     u1i("cells", 0)
 
-    u1i("time_step", time_step)
+    u1i("time_step", timing.step)
     gl.uniform2f(
         gl.getUniformLocation(interact_program, "mouse"),
         mx, my,
@@ -1092,11 +1163,11 @@ function draw() {
     u1i("cells", 0)
     u1i("font", 1)
 
-    u2f("screen_size", canvas.width, canvas.height)
+    u2f("screen_size", canvases.gl.width, canvases.gl.height)
     u1f("zoom_scale", zoom.scale)
     u2f("offset", -pan.x, -pan.y)
-    u1i("time_step", time_step)
-    u1f("time_sec", time_sec)
+    u1i("time_step", timing.step)
+    u1f("time_sec", timing.sec)
     u1i("show_ew", show_ew)
 
     gl.enableVertexAttribArray(0)
@@ -1107,10 +1178,16 @@ function draw() {
 
 
 <script id="webgl_setup">
-const canvas = document.querySelector("canvas")
-canvas.width = innerWidth
-canvas.height = innerHeight
-const gl = canvas.getContext("webgl2")
+const canvases = {
+    gl: document.getElementById("gl_canvas"),
+    ctx: document.getElementById("2d_canvas")
+}
+for (const [_, v] of Object.entries(canvases)) {
+    v.width = innerWidth
+    v.height = innerHeight
+}
+const gl = canvases.gl.getContext("webgl2")
+const ctx = canvases.ctx.getContext("2d")
 
 const vertices = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1])
 const buffer = gl.createBuffer()
