@@ -33,7 +33,62 @@ function loop() {
     mouse.px = mouse.x
     mouse.py = mouse.y
 
+    // todo: remove
+    if (mouse.held[1]) {
+        t.base_steps_per_frame = -(mouse.y - innerHeight) * 2
+    }
+
     requestAnimationFrame(loop)
+}
+</script>
+
+
+<script id="math">
+const floor = Math.floor
+const round = Math.round
+const sqrt = Math.sqrt
+const log2 = Math.log2
+const log = Math.log
+const exp = Math.exp
+const pow = Math.pow
+const abs = Math.abs
+const min = Math.min
+const max = Math.max
+const sin = Math.sin
+const cos = Math.cos
+
+const pi = Math.PI
+const tau = 2 * pi
+
+const rand = Math.random
+function randn(mean=0, std=1, std_clip) {
+    // box-muller transform
+    // tail resamples to `mean + [-1, 1) * std_clip` if clip given
+    // (1 - rand() is to avoid log(0))
+    const z = sqrt(-2 * log(1 - rand())) * cos(tau * rand())
+    const x = mean + std * z
+    if (std_clip !== undefined && (x < -std_clip || x >= std_clip)) {
+        return mean - std_clip + rand() * 2 * std_clip
+    }
+    return x
+}
+
+function clamp(x, a, b) {
+    return min(max(x, a), b)
+}
+function lerp(a, b, t) {
+    return a * (1 - t) + b * t
+}
+function inv_lerp(a, b, x) {
+    if (b - a === 0) return 0 
+    return (x - a) / (b - a)
+}
+function clamped_lerp(a, b, t, f) {
+    // lerp from a, but dont change more than by a factor of f (> 1)
+    return clamp(lerp(a, b, t), a / f, a * f)
+}
+function mod(x, n) {
+    return ((x % n) + n) % n
 }
 </script>
 
@@ -49,22 +104,78 @@ const timing = {
     fps: 60,
     fps_slow: 0,
     fps_hist: [],
-    steps_per_frame: 200,
+
+    base_steps_per_frame: 1,
+    adaptive: true,
+    steps_per_frame: 0,
+    spf_slow: 0,
+    spf_hist: [],
+    fourier_hist: [],
+    fourier_xy_fast: [0, 0],
+    fourier_xy_slow: [0, 0],
 }
 
 setInterval(() => {
-    timing.fps_slow = timing.fps
-}, 1000);
+    const t = timing
+    t.fps_slow = t.fps
+    t.spf_slow = t.steps_per_frame
+}, 1000)
 
 function update_timing() {
     const frame_start = now()
     const t = timing
     t.sec = (frame_start - t.zero) / 1000
+    // update fps
     const last_fps = 1000 / (frame_start - t.last_frame_start)
     t.fps = clamped_lerp(t.fps, last_fps, 0.5, 1.2)
     t.fps_hist.push(t.fps)
     if (t.fps_hist.length > 400) t.fps_hist.shift()
     t.last_frame_start = frame_start
+
+    // update spf
+    if (t.adaptive && !t.paused) {
+        // increase while fourier ema points are aligned with center
+        // decrease if fast starts orbiting slow
+        const s = t.fourier_xy_slow
+        const slow_norm = (s[0]**2 + s[1]**2)**0.5
+        const c_to_slow = [s[0] / slow_norm, s[1] / slow_norm]
+        const sfdx = t.fourier_xy_fast[0] - s[0]
+        const sfdy = t.fourier_xy_fast[1] - s[1]
+        const sf_norm = (sfdx**2 + sfdy**2)**0.5
+        // skip rest if either norms are 0
+        if (slow_norm * sf_norm !== 0) { 
+            const slow_to_fast = [sfdx / sf_norm, sfdy / sf_norm]
+            const cs_sf_dot = (
+                c_to_slow[0] * slow_to_fast[0]
+                + c_to_slow[1] * slow_to_fast[1]
+            )
+            t.base_steps_per_frame *= exp(
+                max(cs_sf_dot - 0.9, -0.2) * 0.1
+            )
+        }
+
+        t.steps_per_frame = max(1,
+            t.base_steps_per_frame
+            // todo: make these log space scaling factors
+            + sin(t.sec * tau * 2) * 200
+            + randn(0, 1, 2) * 50
+        )
+    } else {
+        t.steps_per_frame = t.base_steps_per_frame
+    }
+    t.spf_hist.push(t.steps_per_frame)
+    if (t.spf_hist.length > 400) t.spf_hist.shift()
+
+    // update fourier
+    const a = t.sec * tau * 2
+    const x = t.fps * cos(a)
+    const y = t.fps * sin(a)
+    t.fourier_hist.push([x, y])
+    if (t.fourier_hist.length > 100) t.fourier_hist.shift()
+    t.fourier_xy_fast[0] = lerp(t.fourier_xy_fast[0], x, 0.02)
+    t.fourier_xy_fast[1] = lerp(t.fourier_xy_fast[1], y, 0.02)
+    t.fourier_xy_slow[0] = lerp(t.fourier_xy_slow[0], x, 0.01)
+    t.fourier_xy_slow[1] = lerp(t.fourier_xy_slow[1], y, 0.01)
 }
 </script>
 
@@ -241,20 +352,20 @@ function update_cam() {
 
 <script id="debug">
 function draw_debug() {
+    // clear
     const [w, h] = [canvases.ctx.width, canvases.ctx.height]
     ctx.clearRect(0, 0, w, h)
-
-    ctx.fillStyle = "rgba(0 0 0 / 50%)"
-    ctx.fillRect(0, 0, 400, 200)
-    ctx.fillStyle = "lightgreen"
-    ctx.font = "32px Courier New"
-    ctx.textBaseline = "top"
     const t = timing
-    ctx.fillText(`fps: ${round(t.fps_slow)}`, 10, 10)
 
-    ctx.strokeStyle = ctx.fillStyle
+    // bg
+    ctx.fillStyle = "rgba(0 0 0 / 50%)"
+    ctx.fillRect(0, 0, 600, 200)
+
+    // lines
     ctx.lineCap = "round"
     ctx.lineWidth = 3
+    // fps
+    ctx.strokeStyle = "lightgreen"
     ctx.beginPath()
     for (let i=0; i < t.fps_hist.length; i++) {
         const y = 200 - t.fps_hist[i] / 2
@@ -262,36 +373,61 @@ function draw_debug() {
         ctx.moveTo(i, y)
     }
     ctx.stroke()
-}
-</script>
+    // spf
+    ctx.strokeStyle = "lightblue"
+    ctx.beginPath()
+    for (let i=0; i < t.spf_hist.length; i++) {
+        const y = 200 - t.spf_hist[i] / 10
+        if (i > 0) ctx.lineTo(i, y)
+        ctx.moveTo(i, y)
+    }
+    ctx.stroke()
 
+    // fps fourier cycles
+    ctx.globalAlpha = 0.2
+    ctx.strokeStyle = "lightgreen"
+    const [cx, cy] = [500, 120]
+    ctx.beginPath()
+    for (let i=0; i < t.fourier_hist.length; i++) {
+        const [fx, fy] = t.fourier_hist[i]
+        const x = cx + fx * 0.8
+        const y = cy + fy * 0.8
+        if (i === 0) {
+            ctx.moveTo(x, y)
+            continue
+        }
+        ctx.lineTo(x, y)
+        ctx.stroke()
+        ctx.beginPath()
+        ctx.moveTo(x, y)
+    }
+    ctx.globalAlpha = 1
+    // center and avg
+    ctx.fillStyle = "white"
+    ctx.beginPath()
+    ctx.arc(cx, cy, 3, 0, tau)
+    ctx.fill()
+    ctx.fillStyle = "lightgreen"
+    ctx.beginPath()
+    ctx.arc(
+        cx + t.fourier_xy_fast[0] * 3, cy + t.fourier_xy_fast[1] * 3,
+        3, 0, tau,
+    )
+    ctx.arc(
+        cx + t.fourier_xy_slow[0] * 3, cy + t.fourier_xy_slow[1] * 3,
+        3, 0, tau,
+    )
+    ctx.fill()
 
-<script id="math">
-const floor = Math.floor
-const round = Math.round
-const log2 = Math.log2
-const exp = Math.exp
-const pow = Math.pow
-const abs = Math.abs
-const min = Math.min
-const max = Math.max
-
-function clamp(x, a, b) {
-    return min(max(x, a), b)
-}
-function lerp(a, b, t) {
-    return a * (1 - t) + b * t
-}
-function inv_lerp(a, b, x) {
-    if (b - a === 0) return 0 
-    return (x - a) / (b - a)
-}
-function clamped_lerp(a, b, t, f) {
-    // lerp from a, but dont change more than by a factor of f (> 1)
-    return clamp(lerp(a, b, t), a / f, a * f)
-}
-function mod(x, n) {
-    return ((x % n) + n) % n
+    // text
+    ctx.font = "32px Courier New"
+    ctx.textBaseline = "top"
+    // fps
+    ctx.fillStyle = "lightgreen"
+    ctx.fillText(`fps: ${round(t.fps_slow)}`, 10, 10)
+    // spf
+    ctx.fillStyle = "lightblue"
+    ctx.fillText(`steps/frame: ${round(t.spf_slow)}`, 180, 10)
 }
 </script>
 
@@ -1337,7 +1473,7 @@ function new_cells(size) {
 function init_cells(tex, size) {
     gl.bindTexture(gl.TEXTURE_2D, tex)
     const pixels = new Uint32Array(size * size * 4).map(
-        () => Math.random() * 2**32
+        () => rand() * 2**32
     )
     gl.texImage2D(
         gl.TEXTURE_2D, 0, gl.RGBA32UI, size, size, 0,
