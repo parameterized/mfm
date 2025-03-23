@@ -33,11 +33,7 @@ function loop() {
     mouse.px = mouse.x
     mouse.py = mouse.y
 
-    // todo: remove
-    if (mouse.held[1]) {
-        t.base_steps_per_frame = -(mouse.y - innerHeight) * 2
-    }
-
+    t.frame++
     requestAnimationFrame(loop)
 }
 </script>
@@ -63,14 +59,16 @@ const tau = 2 * pi
 const rand = Math.random
 function randn(mean=0, std=1, std_clip) {
     // box-muller transform
-    // tail resamples to `mean + [-1, 1) * std_clip` if clip given
+    // if std_clip given, and outside +/- mean * std * std_clip,
+    // then we uniformly resample to that
     // (1 - rand() is to avoid log(0))
     const z = sqrt(-2 * log(1 - rand())) * cos(tau * rand())
     const x = mean + std * z
-    if (std_clip !== undefined && (x < -std_clip || x >= std_clip)) {
-        return mean - std_clip + rand() * 2 * std_clip
-    }
-    return x
+    if (std_clip === undefined) return x
+
+    const clip = std * std_clip
+    if (x >= -clip && x < clip) return x
+    return mean - clip + rand() * 2 * clip
 }
 
 function clamp(x, a, b) {
@@ -99,83 +97,73 @@ const timing = {
     paused: false,
     zero: now(),
     sec: 0,
+    frame: 0,
     step: 0,
     last_frame_start: -16,
     fps: 60,
-    fps_slow: 0,
+    fps_slow: 60,
+    fps_everysec: 60,
     fps_hist: [],
 
-    base_steps_per_frame: 1,
+    base_steps_per_frame: 10,
     adaptive: true,
-    steps_per_frame: 0,
-    spf_slow: 0,
+    steps_per_frame: 10,
+    spf_everysec: 10,
     spf_hist: [],
+    spf_accel: 0.002,
     fourier_hist: [],
-    fourier_xy_fast: [0, 0],
-    fourier_xy_slow: [0, 0],
 }
 
 setInterval(() => {
     const t = timing
-    t.fps_slow = t.fps
-    t.spf_slow = t.steps_per_frame
+    t.fps_everysec = t.fps
+    t.spf_everysec = t.steps_per_frame
 }, 1000)
 
 function update_timing() {
     const frame_start = now()
     const t = timing
     t.sec = (frame_start - t.zero) / 1000
+
     // update fps
     const last_fps = 1000 / (frame_start - t.last_frame_start)
+    t.last_frame_start = frame_start
     t.fps = clamped_lerp(t.fps, last_fps, 0.5, 1.2)
+    t.fps_slow = clamped_lerp(t.fps_slow, t.fps, 0.02, 1.2)
     t.fps_hist.push(t.fps)
     if (t.fps_hist.length > 400) t.fps_hist.shift()
-    t.last_frame_start = frame_start
+    // cyclic fps history for debug view
+    const a = t.frame / 60 * tau
+    t.fourier_hist.push([t.fps * cos(a), t.fps * sin(a)])
+    if (t.fourier_hist.length > 100) t.fourier_hist.shift()
 
-    // update spf
+    // update steps/frame
     if (t.adaptive && !t.paused) {
-        // increase while fourier ema points are aligned with center
-        // decrease if fast starts orbiting slow
-        const s = t.fourier_xy_slow
-        const slow_norm = (s[0]**2 + s[1]**2)**0.5
-        const c_to_slow = [s[0] / slow_norm, s[1] / slow_norm]
-        const sfdx = t.fourier_xy_fast[0] - s[0]
-        const sfdy = t.fourier_xy_fast[1] - s[1]
-        const sf_norm = (sfdx**2 + sfdy**2)**0.5
-        // skip rest if either norms are 0
-        if (slow_norm * sf_norm !== 0) { 
-            const slow_to_fast = [sfdx / sf_norm, sfdy / sf_norm]
-            const cs_sf_dot = (
-                c_to_slow[0] * slow_to_fast[0]
-                + c_to_slow[1] * slow_to_fast[1]
-            )
-            t.base_steps_per_frame *= exp(
-                max(cs_sf_dot - 0.9, -0.2) * 0.1
-            )
-        }
-
-        t.steps_per_frame = max(1,
-            t.base_steps_per_frame
-            // todo: make these log space scaling factors
-            + sin(t.sec * tau * 2) * 200
-            + randn(0, 1, 2) * 50
+        // increase while slow/fast fps moving averages agree
+        // decrease if they differ more than 10%
+        const err = 1 - min(t.fps / t.fps_slow, t.fps_slow / t.fps)
+        // increase spf acceleration while err < 10%
+        t.spf_accel = lerp(
+            t.spf_accel,
+            max(0.10 - err, 0) * 0.02,
+            0.01,
         )
+        t.base_steps_per_frame = max(t.base_steps_per_frame * exp(
+            t.spf_accel
+            // 10x stronger proportional decrease while err > 10%
+            + min(0.10 - err, 0) * 0.2
+        ), 1)
+
+        // scale spf with a wave, peaking every 60 frames
+        // (to make occasional detectable frame time increases)
+        t.steps_per_frame = max(t.base_steps_per_frame * exp(
+            0.15 * sin(t.frame / 60 * tau)
+        ), 1)
     } else {
         t.steps_per_frame = t.base_steps_per_frame
     }
     t.spf_hist.push(t.steps_per_frame)
     if (t.spf_hist.length > 400) t.spf_hist.shift()
-
-    // update fourier
-    const a = t.sec * tau * 2
-    const x = t.fps * cos(a)
-    const y = t.fps * sin(a)
-    t.fourier_hist.push([x, y])
-    if (t.fourier_hist.length > 100) t.fourier_hist.shift()
-    t.fourier_xy_fast[0] = lerp(t.fourier_xy_fast[0], x, 0.02)
-    t.fourier_xy_fast[1] = lerp(t.fourier_xy_fast[1], y, 0.02)
-    t.fourier_xy_slow[0] = lerp(t.fourier_xy_slow[0], x, 0.01)
-    t.fourier_xy_slow[1] = lerp(t.fourier_xy_slow[1], y, 0.01)
 }
 </script>
 
@@ -368,7 +356,7 @@ function draw_debug() {
     ctx.strokeStyle = "lightgreen"
     ctx.beginPath()
     for (let i=0; i < t.fps_hist.length; i++) {
-        const y = 200 - t.fps_hist[i] / 2
+        const y = 200 - t.fps_hist[i] * 0.8
         if (i > 0) ctx.lineTo(i, y)
         ctx.moveTo(i, y)
     }
@@ -382,6 +370,15 @@ function draw_debug() {
         ctx.moveTo(i, y)
     }
     ctx.stroke()
+
+    // slow fps circle
+    ctx.strokeStyle = "white"
+    ctx.fillStyle = "green"
+    ctx.beginPath()
+    const fps_slow_y = 200 - t.fps_slow * 0.8
+    ctx.arc(t.fps_hist.length, fps_slow_y, 3, 0, tau)
+    ctx.stroke()
+    ctx.fill()
 
     // fps fourier cycles
     ctx.globalAlpha = 0.2
@@ -402,32 +399,16 @@ function draw_debug() {
         ctx.moveTo(x, y)
     }
     ctx.globalAlpha = 1
-    // center and avg
-    ctx.fillStyle = "white"
-    ctx.beginPath()
-    ctx.arc(cx, cy, 3, 0, tau)
-    ctx.fill()
-    ctx.fillStyle = "lightgreen"
-    ctx.beginPath()
-    ctx.arc(
-        cx + t.fourier_xy_fast[0] * 3, cy + t.fourier_xy_fast[1] * 3,
-        3, 0, tau,
-    )
-    ctx.arc(
-        cx + t.fourier_xy_slow[0] * 3, cy + t.fourier_xy_slow[1] * 3,
-        3, 0, tau,
-    )
-    ctx.fill()
 
     // text
     ctx.font = "32px Courier New"
     ctx.textBaseline = "top"
     // fps
     ctx.fillStyle = "lightgreen"
-    ctx.fillText(`fps: ${round(t.fps_slow)}`, 10, 10)
+    ctx.fillText(`fps: ${round(t.fps_everysec)}`, 10, 10)
     // spf
     ctx.fillStyle = "lightblue"
-    ctx.fillText(`steps/frame: ${round(t.spf_slow)}`, 180, 10)
+    ctx.fillText(`steps/frame: ${round(t.spf_everysec)}`, 180, 10)
 }
 </script>
 
